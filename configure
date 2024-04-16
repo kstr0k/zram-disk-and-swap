@@ -1,0 +1,34 @@
+#!/bin/sh
+#shellcheck shell=dash
+
+set -ue
+
+me=$0
+mydir=${me%/*}; mydir=$(readlink -f "$mydir")
+prefix=/usr
+
+usage() {
+  printf %s\\n 'Usage: ./configure [--prefix=PREFIX]'
+}
+
+while [ "$#" != 0 ]; do
+  case "$1" in
+    (--prefix=*) prefix=$(readlink -f "${1#--prefix=}"); shift ;;
+    (--) shift; break ;;
+    (-h|--help) usage; exit 0 ;;
+    (*)
+      exec >&2
+      printf %s\\n "ERROR: unknown argument: $1" ''; usage; exit 1
+      ;;
+  esac
+done
+
+printf %s\\n "PREFIX:=$prefix" '' >"$mydir"/config.mk
+# copy some defs, comment them; also copy following comment line if any
+sed <"$mydir"/GNUmakefile >>"$mydir"/config.mk \
+  -n -e ':s' -e '/^$/q' -e'/^\(PREFIX \|PKG \|#\)/! { s|^|#|p; n; /^# \^/p; b s }'
+cat <<EOMSG
+Configured with PREFIX $prefix in $mydir -- now run
+  make install [DESTDIR=DIR]
+(or tweak config.mk first)
+EOMSG
