@@ -1,0 +1,92 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          zram-disk-and-swap-disk
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+## X-Start-Before:    $remote_fs
+## X-Stop-After:      $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 6
+# Short-Description: zram-disk-and-swap zramdisk service
+### END INIT INFO
+
+#shellcheck shell=dash
+set -u
+
+# configurable: override in /etc/default
+ZRAMDISK_UNCOMP_PERCENT=90  # uncompressed size, overallocate away
+  ZRAMDISK_COMP_PERCENT=40  # actual memory limit
+ZRAMDISK_MP=/zram  # mountpoint directly under "/" (avoids umount problems)
+ZRAMDISK_ALGOS='lz4 zstd lzo lzo_rle'  # preferred order
+ZRAMDISK_MKFS_LABEL=ZRAMDISK
+ZRAMDISK_MKFS_CMD=mkfs.ext4
+ZRAMDISK_MKFS_OPTS='^has_journal,sparse_super2,extent,flex_bg,uninit_bg,^dir_nlink,^huge_file,^metadata_csum,^extra_isize,^64bit'
+ZRAMDISK_MKFS_FLAGS='-E num_backup_sb=0'
+ZRAMDISK_MKFS() {  # args: /dev/zramN
+  # man mkfs.ext4; man ext4;  # disable as many features as possible
+  "$ZRAMDISK_MKFS_CMD" -O "$ZRAMDISK_MKFS_OPTS" $ZRAMDISK_MKFS_FLAGS -L "$ZRAMDISK_MKFS_LABEL" "$1"
+}
+ALLOC_ZDEV_PATH=/usr/libexec/zram-disk-and-swap/alloc-zram-dev
+# end configurable
+if [ -f /etc/default/zram-disk-and-swap ]; then
+    . /etc/default/zram-disk-and-swap
+fi
+
+
+mem_stat() { awk "/$1/"'{print $2}' /proc/meminfo; }  # in kB
+
+start() {
+  ! mountpoint -q "$ZRAMDISK_MP" || return 0
+  local mem_sz uncomp_sz comp_sz
+  mem_sz=$(mem_stat MemAvailable)
+  uncomp_sz=$(( mem_sz * ZRAMDISK_UNCOMP_PERCENT / 100 * 1024 ))
+    comp_sz=$(( mem_sz *   ZRAMDISK_COMP_PERCENT / 100 * 1024 ))
+  local ZDEV
+  ZDEV=$("$ALLOC_ZDEV_PATH" --alloc-zram-dev "$uncomp_sz" "$comp_sz" $ZRAMDISK_ALGOS)
+  if [ -b "$ZDEV" ]; then
+    ZRAMDISK_MKFS "$ZDEV"
+    mkdir -p "$ZRAMDISK_MP"; mount -o relatime,barrier=0,discard "$ZDEV" "$ZRAMDISK_MP"
+  fi
+}
+
+restart() {
+  if ! mountpoint -q "$ZRAMDISK_MP"; then  start; return; fi
+  BAK=$(mktemp -d -p /tmp zrambak.XXXX)
+  cp -aT "$ZRAMDISK_MP"/ "$BAK"
+  stop; start
+  cp -aT "$BAK" "$ZRAMDISK_MP"/ && rm -rf "$BAK"
+}
+
+stop() {
+  umount -R "$ZRAMDISK_MP" || return 1
+  local ZDEV
+  ZDEV=$(findmnt -n -o SOURCE "$ZRAMDISK_MP"/) || return 0
+  zramctl -r "$ZDEV" || :
+  return 0
+}
+
+status() {
+  [ -x "$ALLOC_ZDEV_PATH" ] || printf %s\\n "missing: $ALLOC_ZDEV_PATH"
+  printf %s\\n 'zram devices:'; zramctl
+  printf %s\\n '' 'zram mounts:'; findmnt "$ZRAMDISK_MP"
+  return 0
+}
+
+save() {
+  local BAK; BAK=$(mktemp -up /tmp zrambak.XXXXXX.squashfs)
+  mksquashfs "$ZRAMDISK_MP" "$BAK" -comp zstd -b 1M && printf %s\\n 1>&2 "$BAK"
+  return $?
+}
+
+usage() {
+  printf %s\\n "$0 start|stop|restart|status|save"
+  return 0
+}
+
+case "${1:-}" in
+  (start|stop|restart|status|save) "$1" ;;
+  (really-test-all-please) start; restart; stop; restart; status; save ;;
+  (--help|-h|'') usage ;;
+esac
+
+exit 0

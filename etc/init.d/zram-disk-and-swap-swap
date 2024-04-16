@@ -1,0 +1,75 @@
+#!/bin/bash
+set -u
+
+### BEGIN INIT INFO
+# Provides:          zram-disk-and-swap-swap
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 6
+# Short-Description: zram-disk-and-swap zram swap service
+### END INIT INFO
+
+# configurable:: override in /etc/default
+ZRAMSWAP_PRIORITY=1000
+ZRAMSWAP_UNCOMP_PERCENT=90  # uncompressed size, overallocate away
+  ZRAMSWAP_COMP_PERCENT=40  # actual memory limit
+ZRAMSWAP_ALGOS='lz4 zstd lzo lzo_rle'
+ALLOC_ZDEV_PATH=/usr/libexec/zram-disk-and-swap/alloc-zram-dev
+# end configurable
+if [ -f /etc/default/zram-disk-and-swap ]; then
+    . /etc/default/zram-disk-and-swap
+fi
+
+mem_stat() { awk "/$1/"'{print $2}' /proc/meminfo; }
+
+start() {
+  if grep -q /dev/zram /proc/swaps 2>/dev/null; then
+    printf %s\\n 'Probably already configured'; return 0
+  fi
+
+  local mem_sz uncomp_sz comp_sz
+  mem_sz=$(mem_stat MemAvailable)
+  uncomp_sz=$(( mem_sz * ZRAMSWAP_UNCOMP_PERCENT / 100 * 1024 ))
+    comp_sz=$(( mem_sz *   ZRAMSWAP_COMP_PERCENT / 100 * 1024 ))
+  local ZDEV
+  ZDEV=$("$ALLOC_ZDEV_PATH" --alloc-zram-dev "$uncomp_sz" "$comp_sz" $ZRAMSWAP_ALGOS)
+  if [ -b "$ZDEV" ]; then
+      mkswap "$ZDEV"; swapon --discard -p "$ZRAMSWAP_PRIORITY" "$ZDEV"
+  fi
+}
+
+stop() {
+  local ZDEV
+  swapon -s | sed -ne '/^\/dev\/zram/{ s/[[:space:]][[:space:]]*.*$//p }' |
+    while IFS= read -r ZDEV; do
+      swapoff "$ZDEV"; zramctl -r "$ZDEV"
+    done
+  modprobe -r zram 2>/dev/null || :
+}
+
+restart() {
+  stop
+  start
+}
+
+status() {
+  [ -x "$ALLOC_ZDEV_PATH" ] || printf %s\\n "missing: $ALLOC_ZDEV_PATH"
+  printf %s\\n 'zram devices:'; zramctl
+  printf %s\\n '' 'zram swap devices:'; swapon -s
+  return 0
+}
+
+usage() {
+  printf %s\\n "$0 start|stop|restart|status"
+  return 0
+}
+
+case "${1:-}" in
+  (start|stop|restart|status) "$1" ;;
+  (really-test-all-please) start; restart; stop; restart; status  ;;
+  (--help|-h|'') usage ;;
+esac
+
+
+exit 0
