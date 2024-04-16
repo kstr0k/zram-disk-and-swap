@@ -1,0 +1,60 @@
+#!/bin/sh
+
+#shellcheck shell=dash
+set -ue
+
+# all zram device allocations (zramctl calls) should coordinate via a flock
+# watch out for other services (or anything using fixed zramN names)
+zramctl_path=$(command -v zramctl)
+locked_zramctl() {
+  flock "$zramctl_path" "$zramctl_path" "$@"
+}
+
+grepFq() {  # args: needle haystack
+  case "$2" in
+    (*$1*) return 0 ;; (*) return 1 ;;
+  esac
+}
+find_comp_algo() {  # args: try_comp_algo ... # sets "$algo"
+  local available_algos; IFS= read -r available_algos </sys/block/zram0/comp_algorithm
+  for algo; do
+    grepFq "[!a-zA-Z0-9_-]${algo}[!a-zA-Z0-9_-]" " $available_algos " && break
+  done
+  # returns status of last grep, i.e. fails if none found
+}
+alloc_zdev() {  # args: uncompressed_sz compressed_sz  # sets "$ZDEV"
+  local uncomp_sz comp_sz try_comp_algos
+  uncomp_sz=$1; comp_sz=$2; shift 2
+  local algo i
+  ZDEV=''
+  # --first-time sleep: zramctl can fail with "device busy"
+  modprobe zram num_devices=1 --first-time 2>/dev/null && sleep 0.15
+  if ! find_comp_algo "$@"; then exit 1; fi
+  for i in 1 2 3; do  # zramctl fails even with sleep, so retry
+    if ZDEV=$(locked_zramctl -f -a "$algo" -s "$uncomp_sz")
+    then break
+    else sleep 0.3
+    fi
+  done
+  if [ -n "$ZDEV" ] && [ -b "$ZDEV" ]; then
+    [ 0 = "$comp_sz" ] || printf %s\\n "$comp_sz" >/sys/block/"${ZDEV##*/}"/mem_limit
+    return 0
+  else
+    return 1
+  fi
+}
+
+main() {
+  local ZDEV
+  if alloc_zdev "$@"; then
+    printf %s\\n "$ZDEV"
+    exit 0
+  else
+    exit 1
+  fi
+}
+
+if [ --alloc-zram-dev = "${1:-}" ]; then
+  shift
+  main "$@"
+fi
